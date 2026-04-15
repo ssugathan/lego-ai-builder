@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Lego Builder</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 13px;
+      background: #111;
+      color: #ccc;
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Sidebar ─────────────────────────────────────────── */
+    #sidebar {
+      width: 320px;
+      min-width: 320px;
+      background: #1a1a1a;
+      border-right: 1px solid #2a2a2a;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #sidebar-header {
+      padding: 14px 16px 10px;
+      border-bottom: 1px solid #2a2a2a;
+    }
+    #sidebar-header h1 { font-size: 14px; color: #eee; letter-spacing: 0.05em; }
+    #sidebar-header p  { font-size: 11px; color: #555; margin-top: 3px; }
+
+    #sidebar-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    label.field-label {
+      font-size: 11px;
+      color: #666;
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    select, textarea, button, input[type="text"] {
+      font-family: inherit;
+      font-size: 12px;
+      background: #222;
+      color: #ddd;
+      border: 1px solid #333;
+      border-radius: 3px;
+      width: 100%;
+    }
+
+    textarea, input[type="text"] {
+      padding: 8px;
+      line-height: 1.5;
+    }
+    textarea { resize: vertical; min-height: 60px; }
+
+    .btn-primary {
+      padding: 9px;
+      background: #1e3a5f;
+      border-color: #2a5a9f;
+      color: #7ec8ff;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: bold;
+      letter-spacing: 0.04em;
+      transition: background 0.15s;
+    }
+    .btn-primary:hover   { background: #2a4a7f; }
+    .btn-primary:active  { background: #152a4a; }
+    .btn-primary.running { background: #1a3a1a; color: #6abf6a; border-color: #2a6a2a; }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-secondary {
+      padding: 8px;
+      background: #1a2a3a;
+      border-color: #2a4a6a;
+      color: #5a8abf;
+      cursor: pointer;
+      font-size: 12px;
+      transition: background 0.15s;
+    }
+    .btn-secondary:hover   { background: #223a50; }
+    .btn-secondary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .section-sep {
+      border: none;
+      border-top: 1px solid #2a2a2a;
+      margin: 4px 0;
+    }
+
+    #error-msg {
+      font-size: 11px;
+      color: #e05555;
+      white-space: pre-wrap;
+      word-break: break-word;
+      display: none;
+    }
+
+    #status-msg {
+      font-size: 11px;
+      color: #555;
+      display: none;
+    }
+
+    /* ── Validation panel ────────────────────────────────── */
+    .info-panel {
+      padding: 8px;
+      background: #1a1a2a;
+      border: 1px solid #2a2a4a;
+      border-radius: 3px;
+      font-size: 11px;
+      display: none;
+    }
+    .info-panel-title {
+      color: #666;
+      text-transform: uppercase;
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      margin-bottom: 4px;
+    }
+
+    /* ── Parts panel (collapsible) ───────────────────────── */
+    .collapsible-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .collapsible-header .arrow {
+      font-size: 10px;
+      color: #555;
+      transition: transform 0.15s;
+    }
+    .collapsible-header.open .arrow { transform: rotate(90deg); }
+    .collapsible-body { display: none; }
+    .collapsible-body.open { display: block; }
+
+    /* ── Part legend ─────────────────────────────────────── */
+    #legend { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: #999;
+    }
+    .legend-swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      flex-shrink: 0;
+    }
+    .legend-count { margin-left: auto; color: #555; }
+    .legend-crit  { color: #f39c12; font-size: 10px; }
+    .legend-type  { color: #555; font-size: 10px; }
+
+    /* ── Main area ───────────────────────────────────────── */
+    #main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #canvas-container {
+      flex: 1;
+      position: relative;
+      background: #0d0d0d;
+      overflow: hidden;
+    }
+    #canvas-container canvas { display: block; }
+
+    #overlay-hint {
+      position: absolute;
+      bottom: 12px;
+      right: 14px;
+      font-size: 11px;
+      color: #333;
+      pointer-events: none;
+    }
+
+    /* ── Stats bar ───────────────────────────────────────── */
+    #stats-bar {
+      height: 56px;
+      background: #161616;
+      border-top: 1px solid #2a2a2a;
+      padding: 0 18px;
+      display: flex;
+      align-items: center;
+      gap: 32px;
+      overflow: hidden;
+    }
+    .stat-item { display: flex; flex-direction: column; gap: 2px; }
+    .stat-label { font-size: 10px; color: #444; text-transform: uppercase; letter-spacing: 0.06em; }
+    .stat-value { font-size: 15px; color: #ddd; }
+  </style>
+</head>
+
+<body>
+
+<!-- ── Sidebar ───────────────────────────────────────────── -->
+<div id="sidebar">
+  <div id="sidebar-header">
+    <h1>LEGO BUILDER</h1>
+    <p>text to voxel model</p>
+  </div>
+
+  <div id="sidebar-body">
+    <!-- Step 1: Generate -->
+    <div>
+      <label class="field-label">Describe what to build</label>
+      <textarea id="description-input" spellcheck="false"
+        placeholder="e.g. A red fire truck with a ladder on top and 4 black wheels"></textarea>
+    </div>
+
+    <button id="generate-btn" class="btn-primary">Generate</button>
+
+    <div id="status-msg"></div>
+    <div id="error-msg"></div>
+
+    <!-- Validation result -->
+    <div id="validation-panel" class="info-panel">
+      <div class="info-panel-title">Validation</div>
+      <div id="val-guess" style="color:#ddd;"></div>
+      <div id="val-confidence" style="margin-top:3px;"></div>
+      <div id="val-issues" style="color:#888; margin-top:4px;"></div>
+      <div id="val-edits" style="color:#555; margin-top:3px;"></div>
+    </div>
+
+    <hr class="section-sep">
+
+    <!-- Step 2: Refine -->
+    <div>
+      <label class="field-label">Feedback (refine the model)</label>
+      <input type="text" id="feedback-input" placeholder="e.g. Make the wheels bigger"
+        disabled>
+    </div>
+
+    <button id="refine-btn" class="btn-secondary" disabled>Refine</button>
+
+    <!-- Feedback result -->
+    <div id="feedback-panel" class="info-panel">
+      <div class="info-panel-title">Feedback Result</div>
+      <div id="fb-interpretation" style="color:#ddd;"></div>
+      <div id="fb-confidence" style="margin-top:3px;"></div>
+      <div id="fb-edits" style="color:#555; margin-top:3px;"></div>
+    </div>
+
+    <hr class="section-sep">
+
+    <!-- Parts list (collapsible) -->
+    <div>
+      <div class="collapsible-header" id="parts-toggle" style="display:none;">
+        <span class="arrow">&#9654;</span>
+        <label class="field-label" style="margin-bottom:0; cursor:pointer;">Parts</label>
+      </div>
+      <div class="collapsible-body" id="parts-body">
+        <div id="legend"></div>
+      </div>
+    </div>
+
+    <!-- Strategy panel (shown after generate) -->
+    <div id="strategy-panel" class="info-panel">
+      <div class="info-panel-title">Strategy</div>
+      <div id="strategy-content"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Main viewer ───────────────────────────────────────── -->
+<div id="main">
+  <div id="canvas-container">
+    <div id="overlay-hint">drag to orbit / scroll to zoom / right-drag to pan</div>
+  </div>
+
+  <div id="stats-bar">
+    <div class="stat-item">
+      <span class="stat-label">Voxels</span>
+      <span class="stat-value" id="stat-voxels">--</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Parts</span>
+      <span class="stat-value" id="stat-parts">--</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Grid</span>
+      <span class="stat-value" id="stat-grid">100^3</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Three.js viewer ───────────────────────────────────── -->
+<script type="module">
+import * as THREE        from './lib/three.module.js';
+import { OrbitControls } from './lib/OrbitControls.js';
+
+// ── State ────────────────────────────────────────────────
+let sessionId = null;
+
+// ── LEGO color map ───────────────────────────────────────
+const LEGO_COLORS = {
+  black: 0x1B2A34, white: 0xF4F4F4,
+  dark_bluish_gray: 0x6B7280, light_bluish_gray: 0xA8AFB8,
+  red: 0xC91A09, dark_red: 0x720E0F,
+  blue: 0x0055BF, light_blue: 0x5A93DB,
+  yellow: 0xF2CD37, orange: 0xD67923,
+  green: 0x237841, dark_green: 0x184632,
+  tan: 0xE4CD9E, dark_tan: 0xB0A06F,
+  brown: 0x582A12, dark_brown: 0x352100,
+  pink: 0xFC97AC, purple: 0xD3359D,
+  teal: 0x069D9F, lime: 0xA5CA18,
+};
+
+const PALETTE = [
+  0xC91A09, 0x0055BF, 0x237841, 0xF2CD37, 0xD67923,
+  0xD3359D, 0x069D9F, 0x6B7280, 0x5A93DB, 0xA5CA18,
+  0x582A12, 0x720E0F, 0xA8AFB8, 0xE4CD9E, 0xFC97AC,
+  0x184632, 0xB0A06F, 0x1B2A34, 0x352100, 0xF4F4F4,
+];
+
+let partColors = {};
+
+function palette(partIdx) {
+  if (partColors[partIdx]) return partColors[partIdx];
+  return PALETTE[(partIdx - 1) % PALETTE.length];
+}
+function paletteHex(partIdx) {
+  return '#' + palette(partIdx).toString(16).padStart(6, '0');
+}
+
+// ── Scene setup ───────────────────────────────────────────
+const scene    = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0d0d);
+scene.fog      = new THREE.FogExp2(0x0d0d0d, 0.003);
+
+const camera   = new THREE.PerspectiveCamera(55, 1, 0.5, 800);
+camera.position.set(120, 90, 130);
+
+const container = document.getElementById('canvas-container');
+const renderer  = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+container.appendChild(renderer.domElement);
+
+const controls  = new OrbitControls(camera, renderer.domElement);
+controls.target.set(50, 30, 50);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.update();
+
+// Lights
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const sun = new THREE.DirectionalLight(0xfff4e0, 0.9);
+sun.position.set(80, 120, 80);
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0xd0e8ff, 0.3);
+fill.position.set(-60, 40, -60);
+scene.add(fill);
+
+// Reference planes (100x100x100 grid)
+(function() {
+  const planeMat = new THREE.MeshBasicMaterial({
+    color: 0x8B7D6B, transparent: true, opacity: 0.5, side: THREE.DoubleSide,
+  });
+
+  // Z=0 ground plane (three.js Y=0)
+  const groundGeo = new THREE.PlaneGeometry(100, 100);
+  const ground = new THREE.Mesh(groundGeo, planeMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.set(50, 0, 50);
+  scene.add(ground);
+
+  // X=0 side plane
+  const sideGeo = new THREE.PlaneGeometry(100, 100);
+  const side = new THREE.Mesh(sideGeo, planeMat.clone());
+  side.material.opacity = 0.3;
+  side.rotation.y = Math.PI / 2;
+  side.position.set(0, 50, 50);
+  scene.add(side);
+
+  // X=0 grid lines
+  const gridLineMat = new THREE.LineBasicMaterial({ color: 0x2a2a2a });
+  const gridX0 = new THREE.Group();
+  for (let h = 0; h <= 100; h += 10) {
+    const g = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, h, 0), new THREE.Vector3(0, h, 100)
+    ]);
+    gridX0.add(new THREE.Line(g, gridLineMat));
+  }
+  for (let d = 0; d <= 100; d += 10) {
+    const g = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 0, d), new THREE.Vector3(0, 100, d)
+    ]);
+    gridX0.add(new THREE.Line(g, gridLineMat));
+  }
+  scene.add(gridX0);
+
+  // Y=0 back plane
+  const backGeo = new THREE.PlaneGeometry(100, 100);
+  const back = new THREE.Mesh(backGeo, planeMat.clone());
+  back.material.opacity = 0.3;
+  back.position.set(50, 50, 0);
+  scene.add(back);
+
+  const gridY0 = new THREE.Group();
+  for (let h = 0; h <= 100; h += 10) {
+    const g = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, h, 0), new THREE.Vector3(100, h, 0)
+    ]);
+    gridY0.add(new THREE.Line(g, gridLineMat));
+  }
+  for (let x = 0; x <= 100; x += 10) {
+    const g = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(x, 0, 0), new THREE.Vector3(x, 100, 0)
+    ]);
+    gridY0.add(new THREE.Line(g, gridLineMat));
+  }
+  scene.add(gridY0);
+})();
+
+// Ground grid overlay
+const gridHelper = new THREE.GridHelper(100, 10, 0x3a3a3a, 0x2a2a2a);
+gridHelper.position.set(50, 0, 50);
+scene.add(gridHelper);
+
+// Axis helper
+const axes = new THREE.AxesHelper(10);
+axes.position.set(0, 0, 0);
+scene.add(axes);
+
+// Baseplate studs — cylindrical bumps on Z=0 ground plane
+// Each stud: ~0.6 diameter, ~0.33 height (1/3 voxel), spaced every 2 units
+(function() {
+  const studRadius = 0.3;
+  const studHeight = 0.33;
+  const spacing = 2;
+  const studGeo = new THREE.CylinderGeometry(studRadius, studRadius, studHeight, 8);
+  const studMat = new THREE.MeshLambertMaterial({
+    color: 0x8a7f6e, transparent: true, opacity: 0.55,
+  });
+
+  // Use instanced mesh for performance (50×50 = 2500 studs)
+  const count = Math.floor(100 / spacing) * Math.floor(100 / spacing);
+  const studMesh = new THREE.InstancedMesh(studGeo, studMat, count);
+  const dummy = new THREE.Object3D();
+  let idx = 0;
+  for (let gx = spacing / 2; gx < 100; gx += spacing) {
+    for (let gz = spacing / 2; gz < 100; gz += spacing) {
+      // Pipeline: X=left/right, Y=front/back, Z=up
+      // Three.js: x=X, y=Z(up), z=Y(front/back)
+      dummy.position.set(gx, studHeight / 2, gz);
+      dummy.updateMatrix();
+      studMesh.setMatrixAt(idx, dummy.matrix);
+      idx++;
+    }
+  }
+  studMesh.instanceMatrix.needsUpdate = true;
+  studMesh.renderOrder = -1; // render behind object
+  scene.add(studMesh);
+})();
+
+// Bounding box wireframe for the 100x100x100 grid
+(function() {
+  const geo = new THREE.BoxGeometry(100, 100, 100);
+  const edges = new THREE.EdgesGeometry(geo);
+  const mat = new THREE.LineBasicMaterial({ color: 0x1e2a1e, transparent: true, opacity: 0.4 });
+  const box = new THREE.LineSegments(edges, mat);
+  box.position.set(50, 50, 50);
+  scene.add(box);
+})();
+
+// ── Resize handling ────────────────────────────────────────
+function resize() {
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}
+new ResizeObserver(resize).observe(container);
+resize();
+
+// ── Render loop ────────────────────────────────────────────
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+// ── Scene object management ────────────────────────────────
+let voxelMeshes = [];
+const voxelGeo  = new THREE.BoxGeometry(0.88, 0.88, 0.88);
+
+function clearVoxels() {
+  for (const m of voxelMeshes) {
+    scene.remove(m);
+    m.material.dispose();
+  }
+  voxelMeshes = [];
+}
+
+function renderVoxels(data) {
+  clearVoxels();
+
+  // Build color map from parts metadata
+  partColors = {};
+  for (const p of data.parts) {
+    const cid = (p.color_id || '').trim().toLowerCase();
+    if (LEGO_COLORS[cid] !== undefined) {
+      partColors[p.idx] = LEGO_COLORS[cid];
+    }
+  }
+
+  // Group by part_idx
+  const byPart = new Map();
+  for (const v of data.voxels) {
+    const idx = v.part_idx;
+    if (!byPart.has(idx)) byPart.set(idx, []);
+    byPart.get(idx).push(v);
+  }
+
+  const dummy = new THREE.Object3D();
+
+  for (const [partIdx, voxels] of byPart) {
+    const mat  = new THREE.MeshLambertMaterial({ color: palette(partIdx) });
+    const mesh = new THREE.InstancedMesh(voxelGeo, mat, voxels.length);
+    mesh.castShadow = false;
+
+    for (let i = 0; i < voxels.length; i++) {
+      const { x, y, z } = voxels[i];
+      // pipeline (x=right, y=depth, z=up) -> three.js (x, y=up, z=depth)
+      dummy.position.set(x + 0.5, z + 0.5, y + 0.5);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    scene.add(mesh);
+    voxelMeshes.push(mesh);
+  }
+}
+
+// ── UI updates ─────────────────────────────────────────────
+function updateStats(data) {
+  document.getElementById('stat-voxels').textContent =
+    data.stats.total_occupied.toLocaleString();
+  document.getElementById('stat-parts').textContent =
+    data.parts.length;
+}
+
+function updatePartsLegend(data) {
+  const toggle = document.getElementById('parts-toggle');
+  const legendEl = document.getElementById('legend');
+  legendEl.innerHTML = '';
+
+  if (!data.parts.length) {
+    toggle.style.display = 'none';
+    return;
+  }
+
+  toggle.style.display = 'flex';
+
+  for (const p of data.parts) {
+    const row = document.createElement('div');
+    row.className = 'legend-row';
+
+    const swatch = document.createElement('span');
+    swatch.className = 'legend-swatch';
+    swatch.style.background = paletteHex(p.idx);
+
+    const name = document.createElement('span');
+    name.textContent = p.name;
+
+    row.appendChild(swatch);
+    row.appendChild(name);
+
+    if (p.type) {
+      const typeEl = document.createElement('span');
+      typeEl.className = 'legend-type';
+      typeEl.textContent = p.type;
+      row.appendChild(typeEl);
+    }
+
+    if (p.critical) {
+      const crit = document.createElement('span');
+      crit.className = 'legend-crit';
+      crit.textContent = 'CRIT';
+      row.appendChild(crit);
+    }
+
+    const count = document.createElement('span');
+    count.className = 'legend-count';
+    count.textContent = (p.voxel_count || 0).toLocaleString();
+    row.appendChild(count);
+
+    legendEl.appendChild(row);
+  }
+}
+
+function showValidation(val) {
+  const panel = document.getElementById('validation-panel');
+  if (!val) { panel.style.display = 'none'; return; }
+
+  document.getElementById('val-guess').textContent = 'Guess: ' + (val.guess || '--');
+  const confColor = val.confidence === 'high' ? '#6abf6a' : val.confidence === 'medium' ? '#f39c12' : '#e05555';
+  document.getElementById('val-confidence').innerHTML =
+    'Confidence: <span style="color:' + confColor + '">' + (val.confidence || '?') + '</span>';
+
+  const issues = val.issues || [];
+  document.getElementById('val-issues').textContent =
+    issues.length ? 'Issues: ' + issues.join('; ') : '';
+  document.getElementById('val-edits').textContent =
+    val.edits_applied ? 'Edits applied: ' + val.edits_applied : '';
+
+  panel.style.display = 'block';
+}
+
+function showFeedbackResult(data) {
+  const panel = document.getElementById('feedback-panel');
+  if (!data) { panel.style.display = 'none'; return; }
+
+  document.getElementById('fb-interpretation').textContent =
+    data.feedback_interpretation || '';
+  const confColor = data.confidence === 'high' ? '#6abf6a' : data.confidence === 'medium' ? '#f39c12' : '#e05555';
+  document.getElementById('fb-confidence').innerHTML =
+    data.confidence ? 'Confidence: <span style="color:' + confColor + '">' + data.confidence + '</span>' : '';
+  document.getElementById('fb-edits').textContent =
+    data.edits_applied ? 'Edits applied: ' + data.edits_applied : 'No edits applied';
+
+  panel.style.display = 'block';
+}
+
+function showStatus(msg, color) {
+  const el = document.getElementById('status-msg');
+  el.textContent = msg;
+  el.style.color = color || '#555';
+  el.style.display = msg ? 'block' : 'none';
+}
+
+function showError(msg) {
+  const el = document.getElementById('error-msg');
+  el.textContent = msg;
+  el.style.display = msg ? 'block' : 'none';
+}
+
+function showStrategy(strategy) {
+  const panel = document.getElementById('strategy-panel');
+  const content = document.getElementById('strategy-content');
+  if (!strategy) { panel.style.display = 'none'; return; }
+
+  const lines = [
+    strategy.archetype && '<b>Archetype:</b> ' + strategy.archetype,
+    strategy.iconic_profile && '<b>Profile:</b> ' + strategy.iconic_profile,
+    strategy.voxel_hazards && '<b>Hazards:</b> ' + [].concat(strategy.voxel_hazards).join(', '),
+    strategy.layer_splay_method && '<b>Splay:</b> ' + strategy.layer_splay_method,
+    strategy.axis_mapping && '<b>Axis:</b> ' + strategy.axis_mapping,
+  ].filter(Boolean);
+  content.innerHTML = lines.join('<br>');
+  panel.style.display = 'block';
+}
+
+// ── Controls ──────────────────────────────────────────────
+const descInput   = document.getElementById('description-input');
+const generateBtn = document.getElementById('generate-btn');
+const feedbackInput = document.getElementById('feedback-input');
+const refineBtn   = document.getElementById('refine-btn');
+
+// ── Collapsible parts panel ──────────────────────────────
+document.getElementById('parts-toggle').addEventListener('click', function() {
+  this.classList.toggle('open');
+  document.getElementById('parts-body').classList.toggle('open');
+});
+
+// ── Generate ─────────────────────────────────────────────
+generateBtn.addEventListener('click', async () => {
+  const desc = descInput.value.trim();
+  if (!desc) { showStatus('Enter a description first.', '#e05555'); return; }
+
+  generateBtn.disabled = true;
+  generateBtn.textContent = 'Generating...';
+  generateBtn.classList.add('running');
+  showStatus('Calling Gemini + running pipeline...', '#555');
+  showError('');
+  showValidation(null);
+  showFeedbackResult(null);
+  showStrategy(null);
+  sessionId = null;
+
+  try {
+    const res = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description: desc }),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      showError((data.error || 'Generation failed') + (data.detail ? '\n\n' + data.detail : ''));
+      return;
+    }
+
+    // Store session
+    sessionId = data.session_id;
+
+    // Render voxels
+    renderVoxels(data);
+    updateStats(data);
+    updatePartsLegend(data);
+    showValidation(data.validation);
+    showStrategy(data.strategy);
+
+    showStatus('Generated ' + data.parts.length + ' parts, ' +
+      data.stats.total_occupied.toLocaleString() + ' voxels.', '#6abf6a');
+
+    // Enable feedback
+    feedbackInput.disabled = false;
+    refineBtn.disabled = false;
+
+  } catch (e) {
+    showError('Request failed: ' + e.message);
+  } finally {
+    generateBtn.disabled = false;
+    generateBtn.textContent = 'Generate';
+    generateBtn.classList.remove('running');
+  }
+});
+
+// ── Refine ───────────────────────────────────────────────
+refineBtn.addEventListener('click', async () => {
+  const feedback = feedbackInput.value.trim();
+  if (!feedback) { showStatus('Enter feedback first.', '#e05555'); return; }
+  if (!sessionId) { showStatus('Generate a model first.', '#e05555'); return; }
+
+  refineBtn.disabled = true;
+  refineBtn.textContent = 'Refining...';
+  showStatus('Applying feedback...', '#555');
+  showError('');
+  showFeedbackResult(null);
+
+  try {
+    const res = await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, feedback }),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      showError((data.error || 'Feedback failed') + (data.detail ? '\n\n' + data.detail : ''));
+      showStatus('Feedback failed.', '#e05555');
+      return;
+    }
+
+    // Update render
+    renderVoxels(data);
+    updateStats(data);
+    updatePartsLegend(data);
+    showFeedbackResult(data);
+
+    showStatus('Refined: ' + (data.edits_applied || 0) + ' edits applied.', '#6abf6a');
+
+    // Clear feedback input for next round
+    feedbackInput.value = '';
+
+  } catch (e) {
+    showError('Request failed: ' + e.message);
+  } finally {
+    refineBtn.disabled = false;
+    refineBtn.textContent = 'Refine';
+  }
+});
+
+// Allow Enter key in feedback input to trigger refine
+feedbackInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !refineBtn.disabled) {
+    refineBtn.click();
+  }
+});
+</script>
+</body>
+</html>

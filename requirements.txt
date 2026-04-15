@@ -1,0 +1,6 @@
+numpy
+pydantic
+fastapi
+uvicorn[standard]
+google-genai
+python-multipart
