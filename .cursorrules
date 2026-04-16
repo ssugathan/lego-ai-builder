@@ -1,0 +1,40 @@
+Project: Lego Simulator
+A browser-based app that takes a text description or image as input, and generates a 3D voxelized Lego representation of it on a 100x100 baseplate (100 units vertical as well).
+How it works
+
+User provides a description or uploads an image
+If an image, Gemini recognizes what it is
+The input gets decomposed into primitives
+The app builds the Lego representation from those primitives
+AI validates the result and tweaks if needed
+The result is shown to the user for feedback
+User can provide feedback to refine
+Final output is displayed in a 3D voxel space
+
+What this is
+
+An AI-powered generator — the user describes or shows something, and the app figures out how to represent it in voxelized Lego form
+The building is done by the AI, not by the user placing bricks manually
+
+What this is NOT
+
+Not a manual brick-by-brick building tool
+Not a physics simulation
+Not a multiplayer or social tool
+
+
+Rules for working in this codebase
+Before making any changes, scan the full codebase and understand:
+
+How state flows — where state lives, what manages it, and how components read/write to it. Don't introduce a new state pattern.
+Existing logic loops — trace the full pipeline from input (description/image) through decomposition, building, validation, feedback, and rendering. Extend these flows, don't create parallel ones.
+What's intentionally missing — if something seems like an obvious feature but isn't implemented, assume it was deferred on purpose. Don't add it as a side effect of your change.
+Naming and file conventions — match the existing patterns for file names, function names, folder structure, and component organization.
+Performance assumptions — don't introduce optimizations or abstractions that aren't already in use unless I specifically ask for them.
+
+When you're ready to make a change:
+
+Describe which existing files/functions you'll touch and why
+Flag if your change would affect any other flow
+Keep the change as minimal as possible
+If you're unsure about a design decision, ask before implementing

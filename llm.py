@@ -1,8 +1,8 @@
 """
 LLM integration for LEGO part generation.
 
-Uses Gemini 2.5 Pro to convert text descriptions (and eventually images)
-into Part-compatible JSON for the voxel pipeline.
+Uses Gemini 2.5 Pro to convert text descriptions (and optional vision
+recognition via describe_image_bytes) into Part-compatible JSON for the voxel pipeline.
 """
 from __future__ import annotations
 
@@ -813,22 +813,13 @@ def generate_parts(description: str, api_key: str) -> tuple[list[dict], dict | N
     return parts, strategy, stats.to_dict()
 
 
-def describe_image(image_path: str, api_key: str) -> str:
+def describe_image_bytes(image_bytes: bytes, mime_type: str, api_key: str) -> tuple[str, dict]:
     """
-    Call Gemini 2.5 Pro with vision to describe an image for LEGO reconstruction.
+    Call Gemini 2.5 Pro with vision to describe image bytes for LEGO reconstruction.
 
-    Returns a text description suitable for passing to generate_parts().
+    Returns (text_description, call_stats_dict) suitable for chaining into generate_parts().
     """
     client = genai.Client(api_key=api_key)
-
-    with open(image_path, "rb") as f:
-        image_bytes = f.read()
-
-    # Determine MIME type from extension
-    ext = image_path.rsplit(".", 1)[-1].lower()
-    mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
-    mime_type = mime_map.get(ext, "image/jpeg")
-
     contents = [
         genai.types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
         "Describe this object concisely for LEGO brick reconstruction. "
@@ -839,6 +830,23 @@ def describe_image(image_path: str, api_key: str) -> str:
     ]
 
     text, stats = _call_gemini(client, contents, call_type="describe_image", temperature=0.3)
+    return text, stats.to_dict()
+
+
+def describe_image(image_path: str, api_key: str) -> str:
+    """
+    Call Gemini 2.5 Pro with vision to describe an image for LEGO reconstruction.
+
+    Returns a text description suitable for passing to generate_parts().
+    """
+    with open(image_path, "rb") as f:
+        image_bytes = f.read()
+
+    ext = image_path.rsplit(".", 1)[-1].lower()
+    mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+    mime_type = mime_map.get(ext, "image/jpeg")
+
+    text, _stats = describe_image_bytes(image_bytes, mime_type, api_key)
     return text
 
 

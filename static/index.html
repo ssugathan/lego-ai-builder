@@ -208,6 +208,16 @@
     .stat-item { display: flex; flex-direction: column; gap: 2px; }
     .stat-label { font-size: 10px; color: #444; text-transform: uppercase; letter-spacing: 0.06em; }
     .stat-value { font-size: 15px; color: #ddd; }
+
+    .file-row { display: flex; gap: 8px; align-items: center; }
+    .file-row input[type="file"] {
+      flex: 1;
+      min-width: 0;
+      padding: 6px;
+      font-size: 11px;
+    }
+    .file-row .btn-secondary { flex: 0 0 auto; width: auto; padding: 6px 10px; }
+    .field-hint { font-size: 10px; color: #555; margin-top: 4px; }
   </style>
 </head>
 
@@ -217,7 +227,7 @@
 <div id="sidebar">
   <div id="sidebar-header">
     <h1>LEGO BUILDER</h1>
-    <p>text to voxel model</p>
+    <p>text or image to voxel model</p>
   </div>
 
   <div id="sidebar-body">
@@ -225,13 +235,28 @@
     <div>
       <label class="field-label">Describe what to build</label>
       <textarea id="description-input" spellcheck="false"
-        placeholder="e.g. A red fire truck with a ladder on top and 4 black wheels"></textarea>
+        placeholder="e.g. A red fire truck with a ladder on top and 4 black wheels (optional if you upload an image)"></textarea>
+    </div>
+
+    <div>
+      <label class="field-label">Reference image (optional)</label>
+      <div class="file-row">
+        <input type="file" id="image-input" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp">
+        <button type="button" id="clear-image-btn" class="btn-secondary">Clear</button>
+      </div>
+      <div id="image-file-hint" class="field-hint"></div>
     </div>
 
     <button id="generate-btn" class="btn-primary">Generate</button>
 
     <div id="status-msg"></div>
     <div id="error-msg"></div>
+
+    <!-- Gemini vision summary (when an image was uploaded) -->
+    <div id="image-recognition-panel" class="info-panel">
+      <div class="info-panel-title">Image recognition</div>
+      <div id="image-recognition-content" style="color:#bbb;line-height:1.45;"></div>
+    </div>
 
     <!-- Validation result -->
     <div id="validation-panel" class="info-panel">
@@ -673,11 +698,66 @@ function showStrategy(strategy) {
   panel.style.display = 'block';
 }
 
+function showImageRecognition(text) {
+  const panel = document.getElementById('image-recognition-panel');
+  const content = document.getElementById('image-recognition-content');
+  if (!text) { panel.style.display = 'none'; return; }
+  content.textContent = text;
+  panel.style.display = 'block';
+}
+
 // ── Controls ──────────────────────────────────────────────
 const descInput   = document.getElementById('description-input');
+const imageInput  = document.getElementById('image-input');
+const clearImageBtn = document.getElementById('clear-image-btn');
+const imageFileHint = document.getElementById('image-file-hint');
 const generateBtn = document.getElementById('generate-btn');
 const feedbackInput = document.getElementById('feedback-input');
 const refineBtn   = document.getElementById('refine-btn');
+
+const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Could not read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function validateImageFile(file) {
+  if (!/^image\/(jpeg|png|webp)$/i.test(file.type)) {
+    return 'Use JPEG, PNG, or WebP.';
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    return 'Image too large (max 12 MB).';
+  }
+  return '';
+}
+
+function setImageFromFile(file) {
+  imageFileHint.textContent = '';
+  if (!file) return;
+
+  const err = validateImageFile(file);
+  if (err) {
+    imageFileHint.textContent = err;
+    imageInput.value = '';
+    return;
+  }
+  imageFileHint.textContent = file.name + ' (' + (file.size / 1024).toFixed(0) + ' KB)';
+}
+
+imageInput.addEventListener('change', () => {
+  const file = imageInput.files && imageInput.files[0];
+  setImageFromFile(file || null);
+});
+
+clearImageBtn.addEventListener('click', () => {
+  imageInput.value = '';
+  imageFileHint.textContent = '';
+});
 
 // ── Collapsible parts panel ──────────────────────────────
 document.getElementById('parts-toggle').addEventListener('click', function() {
@@ -688,23 +768,49 @@ document.getElementById('parts-toggle').addEventListener('click', function() {
 // ── Generate ─────────────────────────────────────────────
 generateBtn.addEventListener('click', async () => {
   const desc = descInput.value.trim();
-  if (!desc) { showStatus('Enter a description first.', '#e05555'); return; }
+  const file = imageInput.files && imageInput.files[0];
+  if (!desc && !file) {
+    showStatus('Enter a description and/or choose a reference image.', '#e05555');
+    return;
+  }
+
+  let imagePayload = null;
+  if (file) {
+    const err = validateImageFile(file);
+    if (err) {
+      showStatus(err, '#e05555');
+      return;
+    }
+    try {
+      imagePayload = await readFileAsDataURL(file);
+    } catch (e) {
+      showStatus(e.message || 'Could not read image.', '#e05555');
+      return;
+    }
+  }
 
   generateBtn.disabled = true;
   generateBtn.textContent = 'Generating...';
   generateBtn.classList.add('running');
-  showStatus('Calling Gemini + running pipeline...', '#555');
+  const statusBase = imagePayload
+    ? 'Recognizing image + generating model...'
+    : 'Calling Gemini + running pipeline...';
+  showStatus(statusBase, '#555');
   showError('');
   showValidation(null);
   showFeedbackResult(null);
   showStrategy(null);
+  showImageRecognition(null);
   sessionId = null;
 
   try {
+    const payload = { description: desc };
+    if (imagePayload) payload.image = imagePayload;
+
     const res = await fetch('/api/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ description: desc }),
+      body: JSON.stringify(payload),
     });
     const data = await res.json();
 
@@ -722,6 +828,7 @@ generateBtn.addEventListener('click', async () => {
     updatePartsLegend(data);
     showValidation(data.validation);
     showStrategy(data.strategy);
+    showImageRecognition(data.image_recognition || null);
 
     showStatus('Generated ' + data.parts.length + ' parts, ' +
       data.stats.total_occupied.toLocaleString() + ' voxels.', '#6abf6a');

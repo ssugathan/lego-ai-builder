@@ -6,7 +6,7 @@ Usage:
     then open http://localhost:8000
 
 Endpoints:
-    POST /api/generate  — full pipeline: description → voxel render + session
+    POST /api/generate  — full pipeline: text and/or image → voxel render + session
     POST /api/feedback  — refine with user feedback using session context
     POST /api/export    — export finalized model
     GET  /              — serves static/index.html
@@ -17,8 +17,10 @@ Deprecated (kept for backward compatibility):
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
+import re
 import time
 import traceback
 import uuid
@@ -37,7 +39,7 @@ from pydantic import BaseModel
 from pipeline import run_part_world
 from schema import Part, GRID_SIZE
 from render import render_projections
-from llm import generate_parts, validate_and_refine
+from llm import describe_image_bytes, generate_parts, validate_and_refine
 
 app = FastAPI(title="Lego Builder")
 
@@ -163,6 +165,40 @@ def _build_voxel_response(
     return voxels, parts_meta, stats
 
 
+def _decode_request_image(image_field: str | None) -> tuple[bytes, str] | None:
+    """
+    Decode optional base64 image from JSON body.
+    Accepts raw base64 or a data URL (data:image/png;base64,...).
+    Returns (bytes, mime_type) or None if field empty.
+    """
+    if image_field is None:
+        return None
+    s = str(image_field).strip()
+    if not s:
+        return None
+
+    mime_type = "image/jpeg"
+    if s.startswith("data:"):
+        m = re.match(r"data:([^;]+);base64,(.+)", s, re.DOTALL | re.IGNORECASE)
+        if not m:
+            raise ValueError("Invalid image data URL (expected data:<mime>;base64,...)")
+        mime_type = m.group(1).strip() or mime_type
+        b64 = m.group(2).strip()
+    else:
+        b64 = s
+
+    try:
+        raw = base64.b64decode(b64, validate=False)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 image: {exc}") from exc
+
+    max_bytes = 20 * 1024 * 1024
+    if len(raw) > max_bytes:
+        raise ValueError(f"Image too large (max {max_bytes // (1024 * 1024)} MB)")
+
+    return raw, mime_type
+
+
 def _render_and_validate(
     grid: np.ndarray, parts_meta: list[dict], parts_dicts: list[dict],
     description: str, api_key: str,
@@ -177,8 +213,8 @@ def _render_and_validate(
 # Request models
 # ---------------------------------------------------------------------------
 class GenerateRequest(BaseModel):
-    description: str
-    image: str | None = None  # base64 image (future)
+    description: str = ""
+    image: str | None = None  # raw base64 or data:image/...;base64,...
     api_key: str | None = None
 
 
@@ -211,8 +247,8 @@ class ValidateRequest(BaseModel):
 @app.post("/api/generate")
 def api_generate(req: GenerateRequest) -> JSONResponse:
     """
-    Full pipeline: description → generate parts → run pipeline →
-    validate → apply edits → rebuild → return voxels.
+    Full pipeline: description and/or image → (optional vision) → generate parts →
+    run pipeline → validate → apply edits → rebuild → return voxels.
     """
     key = req.api_key or GEMINI_API_KEY
     if not key:
@@ -221,19 +257,69 @@ def api_generate(req: GenerateRequest) -> JSONResponse:
             status_code=400,
         )
 
+    user_description = (req.description or "").strip()
+    try:
+        image_payload = _decode_request_image(req.image)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    if not user_description and not image_payload:
+        return JSONResponse(
+            {"error": "Provide a text description and/or upload an image."},
+            status_code=400,
+        )
+
     t0 = time.monotonic()
+    modality = "text"
+    if image_payload and user_description:
+        modality = "both"
+    elif image_payload:
+        modality = "image"
+
     telemetry: dict = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "endpoint": "/api/generate",
-        "description_length": len(req.description),
-        "modality": "text",
+        "description_length": len(user_description),
+        "modality": modality,
         "stages": {},
     }
 
     try:
+        recognized_text: str | None = None
+
+        # ── Stage 1a: Vision — image → recognition text ─────────
+        if image_payload:
+            img_bytes, img_mime = image_payload
+            t0a = time.monotonic()
+            recognized_text, img_stats = describe_image_bytes(img_bytes, img_mime, key)
+            t0a_end = time.monotonic()
+            telemetry["stages"]["S1a_LLM_ImageRecognition"] = {
+                "label": "Stage 1a — Gemini recognizes uploaded image",
+                "latency_ms": int((t0a_end - t0a) * 1000),
+                "tokens": {
+                    "input": img_stats.get("input_tokens", 0),
+                    "output": img_stats.get("output_tokens", 0),
+                    "thinking": img_stats.get("thinking_tokens", 0),
+                    "cached": img_stats.get("cached_tokens", 0),
+                    "total": img_stats.get("total_tokens", 0),
+                },
+            }
+
+        if user_description and recognized_text:
+            effective_description = (
+                f"{user_description}\n\n"
+                f"Reference subject from uploaded image:\n{recognized_text}"
+            )
+        elif recognized_text:
+            effective_description = recognized_text
+        else:
+            effective_description = user_description
+
+        telemetry["description_length"] = len(effective_description)
+
         # ── Stage 1: LLM Generation ──────────────────────────────
         t1 = time.monotonic()
-        parts_dicts, strategy, gen_stats = generate_parts(req.description, key)
+        parts_dicts, strategy, gen_stats = generate_parts(effective_description, key)
         t1_end = time.monotonic()
         telemetry["stages"]["S1_LLM_Generation"] = {
             "label": "Stage 1 — Gemini generates part structure from description",
@@ -264,7 +350,7 @@ def api_generate(req: GenerateRequest) -> JSONResponse:
         # ── Stage 5: LLM Validation ──────────────────────────────
         t5 = time.monotonic()
         val_result = _render_and_validate(
-            result["grid"], parts_meta, parts_dicts, req.description, key,
+            result["grid"], parts_meta, parts_dicts, effective_description, key,
         )
         t5_end = time.monotonic()
         val_stats = val_result.get("_call_stats", {})
@@ -305,8 +391,8 @@ def api_generate(req: GenerateRequest) -> JSONResponse:
                 "post_rebuild_voxels": result["total_occupied"],
             }
 
-        # Create session
-        session_id = _create_session(req.description, parts_dicts, result["grid"])
+        # Create session (full generation context for feedback / export)
+        session_id = _create_session(effective_description, parts_dicts, result["grid"])
         telemetry["session_id"] = session_id
 
         validation_summary = {
@@ -327,6 +413,9 @@ def api_generate(req: GenerateRequest) -> JSONResponse:
 
         if strategy:
             response["strategy"] = strategy
+
+        if recognized_text is not None:
+            response["image_recognition"] = recognized_text
 
     except Exception as exc:
         telemetry["error"] = str(exc)
