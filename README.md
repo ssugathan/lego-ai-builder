@@ -80,4 +80,4 @@ See SPEC.md for the detailed design document, including the coordinate system, a
 pytest
 ```
 
-`test_pipeline.py` covers the geometry pipeline stages; `test_render.py` holds golden tests for the orthographic projections.
+`test_pipeline.py` covers the geometry pipeline stages; `test_render.py` holds golden tests for the orthographic projections; `test_llm_edits.py` covers instance expansion and edit application.
