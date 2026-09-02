@@ -27,6 +27,7 @@ from functools import cmp_to_key
 import numpy as np
 
 from schema import (
+    GRID_SIZE,
     Part,
     PartDimensions,
     PrimitiveType,
@@ -776,9 +777,9 @@ def _reground(states: list[PartState]) -> list[PartState]:
 # ---------------------------------------------------------------------------
 
 # 1× grid dimensions (world-space units = voxels after final_placement).
-GRID_X: int = 100
-GRID_Y: int = 100
-GRID_Z: int = 100
+GRID_X: int = GRID_SIZE
+GRID_Y: int = GRID_SIZE
+GRID_Z: int = GRID_SIZE
 
 # Sparse claims map: 1× voxel coord → frozenset of claiming part UIDs.
 VoxelCoord = tuple[int, int, int]
@@ -943,7 +944,7 @@ def apply_ownership(
       3. Volume rule (< 20% threshold — part loses voxels it under-represents).
       4. Smallest UID tiebreak.
 
-    Returns a (50, 50, 100) int32 grid: 0 = empty, n = states[n-1] owns voxel.
+    Returns a (100, 100, 100) int32 grid: 0 = empty, n = states[n-1] owns voxel.
     Uncontested voxels are assigned directly without applying the priority chain.
     """
     grid = np.zeros((GRID_X, GRID_Y, GRID_Z), dtype=np.int32)
@@ -1249,7 +1250,7 @@ def build_part_world(parts: list[Part]) -> np.ndarray:
      11. critical_restoration     — restore one voxel for vanished critical parts
      12. enforce_connectivity     — bridge disconnected critical parts; prune orphans
 
-    Returns a (50, 50, 100) int32 ndarray: 0 = empty, n = states[n-1] owns voxel.
+    Returns a (100, 100, 100) int32 ndarray: 0 = empty, n = states[n-1] owns voxel.
     """
     validate_graph(parts)
     enforce_critical_closure(parts)
@@ -1283,9 +1284,9 @@ def run_part_world(
 
     Args:
         parts: list of Part objects describing the model.
-        debug: if False (default), returns the final (50, 50, 100) int32 voxel
+        debug: if False (default), returns the final (100, 100, 100) int32 voxel
                grid. If True, returns a dict with intermediate artifacts:
-                 'grid'           — final voxel grid (50×50×100 int32)
+                 'grid'           — final voxel grid (100×100×100 int32)
                  'states'         — list[PartState] after all pipeline stages
                  'scale'          — uniform scale factor applied
                  'voxel_counts'   — {uid: count} after ownership resolution

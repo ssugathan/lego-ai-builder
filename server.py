@@ -983,7 +983,7 @@ def api_run(req: RunRequest) -> JSONResponse:
         "parts": parts_meta,
         "stats": {
             "total_occupied": total_occupied,
-            "grid_size": {"x": 50, "y": 50, "z": 100},
+            "grid_size": {"x": 100, "y": 100, "z": 100},
         },
     }
 

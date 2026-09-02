@@ -5,7 +5,6 @@ Tests for pipeline stages 10–12:
 from collections import deque
 
 import numpy as np
-import pytest
 
 from pipeline import (
     GRID_X,
