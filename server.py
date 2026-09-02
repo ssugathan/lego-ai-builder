@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import numpy as np  # noqa: E402
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.responses import HTMLResponse, JSONResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
@@ -674,11 +674,21 @@ def api_export(req: ExportRequest) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
+# Debug surfaces — only served when DEBUG_ENDPOINTS=1 is set in the
+# environment; otherwise they 404 as if they did not exist.
+# ---------------------------------------------------------------------------
+def _require_debug_enabled() -> None:
+    if os.environ.get("DEBUG_ENDPOINTS", "") != "1":
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+# ---------------------------------------------------------------------------
 # GET /api/telemetry — view recent pipeline logs (JSON)
 # ---------------------------------------------------------------------------
 @app.get("/api/telemetry")
 def api_telemetry() -> JSONResponse:
-    """Return the last 50 pipeline log entries."""
+    """Return the last 50 pipeline log entries. Requires DEBUG_ENDPOINTS=1."""
+    _require_debug_enabled()
     if not LOG_PATH.exists():
         return JSONResponse(content={"entries": []})
     lines = LOG_PATH.read_text().strip().split("\n")
@@ -695,7 +705,9 @@ RESPONSE_LOG_PATH = Path(__file__).parent / "gemini_responses.jsonl"
 
 @app.get("/api/responses")
 def api_responses(last: int = 10) -> JSONResponse:
-    """Return the last N Gemini responses for debugging."""
+    """Return the last N Gemini responses for debugging. Requires DEBUG_ENDPOINTS=1."""
+    _require_debug_enabled()
+    last = max(1, min(last, 50))
     if not RESPONSE_LOG_PATH.exists():
         return JSONResponse(content={"entries": []})
     lines = RESPONSE_LOG_PATH.read_text().strip().split("\n")
@@ -713,7 +725,8 @@ def api_responses(last: int = 10) -> JSONResponse:
 # ---------------------------------------------------------------------------
 @app.get("/telemetry", response_class=HTMLResponse)
 def telemetry_dashboard():
-    """Telemetry dashboard with top-level metrics and per-job stage breakdown."""
+    """Telemetry dashboard with per-job stage breakdown. Requires DEBUG_ENDPOINTS=1."""
+    _require_debug_enabled()
     return HTMLResponse(content=_TELEMETRY_HTML)
 
 
