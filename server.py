@@ -10,10 +10,6 @@ Endpoints:
     POST /api/feedback  — refine with user feedback using session context
     POST /api/export    — export finalized model
     GET  /              — serves static/index.html
-
-Deprecated (kept for backward compatibility):
-    POST /api/run       — run pipeline from raw parts JSON
-    POST /api/validate  — validate + refine (old multi-step flow)
 """
 from __future__ import annotations
 
@@ -281,17 +277,6 @@ class ExportRequest(BaseModel):
     session_id: str
     format: str = "voxel_json"
 
-
-# Deprecated request models (backward compat)
-class RunRequest(BaseModel):
-    parts: list[Part]
-    debug: bool = False
-
-
-class ValidateRequest(BaseModel):
-    parts: list[Part]
-    description: str
-    debug: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -986,118 +971,6 @@ loadData();
 </script>
 </body>
 </html>"""
-
-
-# ---------------------------------------------------------------------------
-# DEPRECATED: POST /api/run  (old multi-step flow)
-# ---------------------------------------------------------------------------
-@app.post("/api/run")
-def api_run(req: RunRequest) -> JSONResponse:
-    """
-    [DEPRECATED] Run the Part-world pipeline from raw parts JSON.
-    Use POST /api/generate instead for the full pipeline flow.
-    """
-    try:
-        result = run_part_world(req.parts, debug=True)
-    except Exception as exc:
-        return _error_response(exc, "/api/run")
-
-    grid: np.ndarray = result["grid"]
-    states = result["states"]
-    voxel_counts: dict[str, int] = result["voxel_counts"]
-    total_occupied: int = result["total_occupied"]
-
-    by_uid = {p.uid: p for p in req.parts}
-
-    parts_meta = [
-        {
-            "idx": i + 1,
-            "uid": s.uid,
-            "name": by_uid[s.uid].part_name if s.uid in by_uid else s.uid,
-            "critical": by_uid[s.uid].critical if s.uid in by_uid else False,
-            "voxel_count": voxel_counts.get(s.uid, 0),
-            "color_id": by_uid[s.uid].color_id if s.uid in by_uid else "",
-        }
-        for i, s in enumerate(states)
-    ]
-
-    occ = np.argwhere(grid > 0)
-    voxels = [
-        {
-            "x": int(r[0]),
-            "y": int(r[1]),
-            "z": int(r[2]),
-            "part_idx": int(grid[r[0], r[1], r[2]]),
-        }
-        for r in occ
-    ]
-
-    response: dict = {
-        "voxels": voxels,
-        "parts": parts_meta,
-        "stats": {
-            "total_occupied": total_occupied,
-            "grid_size": {"x": 100, "y": 100, "z": 100},
-        },
-    }
-
-    if req.debug:
-        response["debug"] = {
-            "scale": float(result["scale"]),
-            "voxel_counts": voxel_counts,
-        }
-
-    return JSONResponse(content=response)
-
-
-# ---------------------------------------------------------------------------
-# DEPRECATED: POST /api/validate  (old multi-step flow)
-# ---------------------------------------------------------------------------
-@app.post("/api/validate")
-def api_validate(req: ValidateRequest) -> JSONResponse:
-    """
-    [DEPRECATED] Validate + refine from raw parts JSON.
-    Use POST /api/generate + POST /api/feedback instead.
-    """
-    key = GEMINI_API_KEY
-    if not key:
-        return JSONResponse(
-            {"error": "No GEMINI_API_KEY set for validation."},
-            status_code=400,
-        )
-
-    try:
-        result = run_part_world(req.parts, debug=True)
-        grid = result["grid"]
-        by_uid = {p.uid: p for p in req.parts}
-
-        parts_meta = [
-            {
-                "idx": i + 1, "uid": s.uid,
-                "name": by_uid[s.uid].part_name if s.uid in by_uid else s.uid,
-                "critical": by_uid[s.uid].critical if s.uid in by_uid else False,
-                "voxel_count": result["voxel_counts"].get(s.uid, 0),
-                "color_id": by_uid[s.uid].color_id if s.uid in by_uid else "",
-            }
-            for i, s in enumerate(result["states"])
-        ]
-
-        projections = render_projections(grid, parts_meta)
-        images = [(img_bytes, mime) for img_bytes, mime, _label in projections]
-
-        parts_for_llm = [p.model_dump(mode="json") for p in req.parts]
-        val_result = validate_and_refine(images, req.description, parts_for_llm, key)
-
-        refined_parts = val_result.pop("refined_parts", None)
-        response = {"validation": val_result}
-
-        if refined_parts and val_result.get("edit_count", 0) > 0:
-            response["refined_parts"] = refined_parts
-
-    except Exception as exc:
-        return _error_response(exc, "/api/validate")
-
-    return JSONResponse(content=response)
 
 
 # Serve the frontend.  Must be mounted after all API routes.
