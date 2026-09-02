@@ -234,11 +234,35 @@ def _build_voxel_response(
     return voxels, parts_meta, stats
 
 
+# Server-side input limits (mirror the client-side checks in static/index.html;
+# the server must enforce them itself since the demo API is publicly reachable).
+MAX_DESCRIPTION_CHARS = 4000
+MAX_IMAGE_BYTES = 12 * 1024 * 1024  # decoded bytes; matches MAX_IMAGE_BYTES in the client
+
+
+class InputRejected(ValueError):
+    """Client input exceeded a server-side limit (mapped to HTTP 422)."""
+
+
+def _sniff_image_mime(raw: bytes) -> str | None:
+    """Identify jpeg/png/webp from magic bytes; None for anything else."""
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def _decode_request_image(image_field: str | None) -> tuple[bytes, str] | None:
     """
     Decode optional base64 image from JSON body.
     Accepts raw base64 or a data URL (data:image/png;base64,...).
     Returns (bytes, mime_type) or None if field empty.
+
+    Raises InputRejected (→ 422) for oversized or non-jpeg/png/webp payloads,
+    plain ValueError (→ 400) for malformed base64 / data URLs.
     """
     if image_field is None:
         return None
@@ -246,12 +270,10 @@ def _decode_request_image(image_field: str | None) -> tuple[bytes, str] | None:
     if not s:
         return None
 
-    mime_type = "image/jpeg"
     if s.startswith("data:"):
         m = re.match(r"data:([^;]+);base64,(.+)", s, re.DOTALL | re.IGNORECASE)
         if not m:
             raise ValueError("Invalid image data URL (expected data:<mime>;base64,...)")
-        mime_type = m.group(1).strip() or mime_type
         b64 = m.group(2).strip()
     else:
         b64 = s
@@ -261,9 +283,13 @@ def _decode_request_image(image_field: str | None) -> tuple[bytes, str] | None:
     except Exception as exc:
         raise ValueError(f"Invalid base64 image: {exc}") from exc
 
-    max_bytes = 20 * 1024 * 1024
-    if len(raw) > max_bytes:
-        raise ValueError(f"Image too large (max {max_bytes // (1024 * 1024)} MB)")
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise InputRejected(f"Image too large (max {MAX_IMAGE_BYTES // (1024 * 1024)} MB)")
+
+    # Trust the file's magic bytes, not the client-declared mime type.
+    mime_type = _sniff_image_mime(raw)
+    if mime_type is None:
+        raise InputRejected("Unsupported image format. Use JPEG, PNG, or WebP.")
 
     return raw, mime_type
 
@@ -316,8 +342,16 @@ def api_generate(req: GenerateRequest) -> JSONResponse:
         )
 
     user_description = (req.description or "").strip()
+    if len(user_description) > MAX_DESCRIPTION_CHARS:
+        return JSONResponse(
+            {"error": f"Description too long (max {MAX_DESCRIPTION_CHARS} characters)."},
+            status_code=422,
+        )
+
     try:
         image_payload = _decode_request_image(req.image)
+    except InputRejected as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
