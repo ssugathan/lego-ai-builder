@@ -815,7 +815,7 @@ generateBtn.addEventListener('click', async () => {
     const data = await res.json();
 
     if (!res.ok) {
-      showError((data.error || 'Generation failed') + (data.detail ? '\n\n' + data.detail : ''));
+      showError((data.error || 'Generation failed') + (data.error_id ? ' [error id: ' + data.error_id + ']' : ''));
       return;
     }
 
@@ -867,7 +867,7 @@ refineBtn.addEventListener('click', async () => {
     const data = await res.json();
 
     if (!res.ok) {
-      showError((data.error || 'Feedback failed') + (data.detail ? '\n\n' + data.detail : ''));
+      showError((data.error || 'Feedback failed') + (data.error_id ? ' [error id: ' + data.error_id + ']' : ''));
       showStatus('Feedback failed.', '#e05555');
       return;
     }

@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
+import sys
 import time
 import traceback
 import uuid
@@ -30,21 +32,72 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
-import numpy as np
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+import numpy as np  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from fastapi.responses import HTMLResponse, JSONResponse  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 
-from pipeline import run_part_world
-from schema import Part, GRID_SIZE
-from render import render_projections
-from llm import describe_image_bytes, generate_parts, validate_and_refine
+from pipeline import run_part_world  # noqa: E402
+from schema import Part, GRID_SIZE  # noqa: E402
+from render import render_projections  # noqa: E402
+from llm import describe_image_bytes, generate_parts, validate_and_refine  # noqa: E402
 
 app = FastAPI(title="Lego Builder")
 
+log = logging.getLogger("server")
+if not log.handlers and not logging.getLogger().handlers:
+    _handler = logging.StreamHandler(sys.stderr)
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    log.addHandler(_handler)
+log.setLevel(logging.INFO)
+
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 LOG_PATH = Path(__file__).parent / "pipeline_log.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# Error handling
+#
+# Unexpected exceptions are logged server-side with a full traceback and a
+# short error id; the client only ever sees a generic message plus that id.
+# Status mapping (conservative):
+#   502 — upstream model errors: google-genai APIError (and subclasses) or
+#         ValueError raised while parsing/validating model output.
+#   500 — anything else (unexpected server error).
+# Genuine client errors (bad image payload, missing key, empty input) are
+# rejected before the pipeline runs and keep their explicit 4xx responses.
+# ---------------------------------------------------------------------------
+try:
+    from google.genai.errors import APIError as _GenaiAPIError
+except Exception:  # pragma: no cover - genai always present in practice
+    class _GenaiAPIError(Exception):
+        pass
+
+
+def _classify_exception(exc: Exception) -> tuple[int, str]:
+    """Map an unexpected pipeline exception to (status_code, generic message)."""
+    if isinstance(exc, (_GenaiAPIError, ValueError)):
+        return 502, "The model service failed or returned unusable output. Please try again."
+    return 500, "Internal server error."
+
+
+def _error_response(exc: Exception, endpoint: str) -> JSONResponse:
+    """Log the full traceback server-side; return a generic message + error id."""
+    error_id = uuid.uuid4().hex[:8]
+    status, message = _classify_exception(exc)
+    log.error(
+        "[%s] %s error %s: %s\n%s",
+        error_id, endpoint, status, exc, traceback.format_exc(),
+    )
+    return JSONResponse(
+        {
+            "error": message,
+            "error_id": error_id,
+            "detail": f"{message} (error id: {error_id})",
+        },
+        status_code=status,
+    )
 
 # ---------------------------------------------------------------------------
 # Session store (in-memory)
@@ -420,10 +473,7 @@ def api_generate(req: GenerateRequest) -> JSONResponse:
     except Exception as exc:
         telemetry["error"] = str(exc)
         _log_telemetry(telemetry)
-        return JSONResponse(
-            {"error": str(exc), "detail": traceback.format_exc()},
-            status_code=400,
-        )
+        return _error_response(exc, "/api/generate")
 
     # Aggregate token totals across all LLM calls
     total_tokens = 0
@@ -482,7 +532,6 @@ def api_feedback(req: FeedbackRequest) -> JSONResponse:
     try:
         parts_dicts = session["parts"]
         description = session["description"]
-        grid = session["grid"]
 
         # Build parts_meta for projections
         part_objects = _parts_dicts_to_objects(parts_dicts)
@@ -572,10 +621,7 @@ def api_feedback(req: FeedbackRequest) -> JSONResponse:
     except Exception as exc:
         telemetry["error"] = str(exc)
         _log_telemetry(telemetry)
-        return JSONResponse(
-            {"error": str(exc), "detail": traceback.format_exc()},
-            status_code=400,
-        )
+        return _error_response(exc, "/api/feedback")
 
     total_tokens = 0
     total_input = 0
@@ -665,8 +711,6 @@ def api_responses(last: int = 10) -> JSONResponse:
 # ---------------------------------------------------------------------------
 # GET /telemetry — dashboard UI
 # ---------------------------------------------------------------------------
-from fastapi.responses import HTMLResponse
-
 @app.get("/telemetry", response_class=HTMLResponse)
 def telemetry_dashboard():
     """Telemetry dashboard with top-level metrics and per-job stage breakdown."""
@@ -943,10 +987,7 @@ def api_run(req: RunRequest) -> JSONResponse:
     try:
         result = run_part_world(req.parts, debug=True)
     except Exception as exc:
-        return JSONResponse(
-            {"error": str(exc), "detail": traceback.format_exc()},
-            status_code=400,
-        )
+        return _error_response(exc, "/api/run")
 
     grid: np.ndarray = result["grid"]
     states = result["states"]
@@ -1041,10 +1082,7 @@ def api_validate(req: ValidateRequest) -> JSONResponse:
             response["refined_parts"] = refined_parts
 
     except Exception as exc:
-        return JSONResponse(
-            {"error": str(exc), "detail": traceback.format_exc()},
-            status_code=400,
-        )
+        return _error_response(exc, "/api/validate")
 
     return JSONResponse(content=response)
 
