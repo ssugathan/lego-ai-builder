@@ -96,13 +96,29 @@ def _error_response(exc: Exception, endpoint: str) -> JSONResponse:
     )
 
 # ---------------------------------------------------------------------------
-# Session store (in-memory)
+# Session store (in-memory, bounded)
+#
+# Capped LRU store: each session holds a full 100^3 voxel grid, so an
+# unbounded dict lets anyone OOM the demo by generating models. On insert
+# beyond the cap, the least-recently-used session is evicted; feedback or
+# export against an evicted session returns 404 "session expired".
 # ---------------------------------------------------------------------------
-_sessions: dict[str, dict] = {}
+from collections import OrderedDict  # noqa: E402
+
+_MAX_SESSIONS = 100
+_sessions: OrderedDict[str, dict] = OrderedDict()
+
+SESSION_EXPIRED_MSG = (
+    "Session expired or unknown. Sessions are kept in memory and the oldest "
+    "are dropped when the server is busy — generate a new model to continue."
+)
 
 
 def _get_session(session_id: str) -> dict | None:
-    return _sessions.get(session_id)
+    session = _sessions.get(session_id)
+    if session is not None:
+        _sessions.move_to_end(session_id)  # LRU touch
+    return session
 
 
 def _create_session(description: str, parts: list[dict], grid: np.ndarray) -> str:
@@ -112,6 +128,9 @@ def _create_session(description: str, parts: list[dict], grid: np.ndarray) -> st
         "parts": parts,
         "grid": grid,
     }
+    while len(_sessions) > _MAX_SESSIONS:
+        evicted_sid, _ = _sessions.popitem(last=False)
+        log.info("Session store full (max %d): evicted session %s", _MAX_SESSIONS, evicted_sid)
     return sid
 
 
@@ -119,6 +138,7 @@ def _update_session(session_id: str, parts: list[dict], grid: np.ndarray) -> Non
     if session_id in _sessions:
         _sessions[session_id]["parts"] = parts
         _sessions[session_id]["grid"] = grid
+        _sessions.move_to_end(session_id)  # LRU touch
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +515,7 @@ def api_feedback(req: FeedbackRequest) -> JSONResponse:
     session = _get_session(req.session_id)
     if session is None:
         return JSONResponse(
-            {"error": f"Unknown session_id: {req.session_id}"},
+            {"error": SESSION_EXPIRED_MSG},
             status_code=404,
         )
 
@@ -637,7 +657,7 @@ def api_export(req: ExportRequest) -> JSONResponse:
     session = _get_session(req.session_id)
     if session is None:
         return JSONResponse(
-            {"error": f"Unknown session_id: {req.session_id}"},
+            {"error": SESSION_EXPIRED_MSG},
             status_code=404,
         )
 
