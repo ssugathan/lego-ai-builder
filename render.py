@@ -10,7 +10,6 @@ Grid shape: (100, 100, 100) indexed as grid[x, y, z]
 from __future__ import annotations
 
 import io
-from typing import Sequence
 
 import numpy as np
 
@@ -57,68 +56,34 @@ _BG_COLOR = (0.765, 0.690, 0.569)
 _SEG_BG = (0.0, 0.0, 0.0)
 
 
+# view → (projection axis, ray comes from the high-index end of that axis)
+_VIEW_RAYS = {
+    "front": (1, True),    # ray: -Y (y=99→0), image: X(h) × Z(v)
+    "back": (1, False),    # ray: +Y (y=0→99), image: X(h) × Z(v)
+    "left": (0, False),    # ray: +X (x=0→99), image: Y(h) × Z(v)
+    "right": (0, True),    # ray: -X (x=99→0), image: Y(h) × Z(v)
+    "top": (2, True),      # ray: -Z (z=99→0), image: X(h) × Y(v)
+    "bottom": (2, False),  # ray: +Z (z=0→99), image: X(h) × Y(v)
+}
+
+
 def _project_view(grid: np.ndarray, view: str) -> np.ndarray:
     """Project grid along a view axis, returning 2D array of part indices (first hit)."""
     # Ray traversal per spec §5.0: find FIRST non-empty voxel along ray direction
-    if view == "front":
-        # Ray: -Y (y=99→0), image: X(h) × Z(v)
-        for y in range(grid.shape[1] - 1, -1, -1):
-            pass
-        # Use argmax along Y from front (high Y)
-        proj = np.zeros((grid.shape[0], grid.shape[2]), dtype=np.int32)
-        for x in range(grid.shape[0]):
-            for z in range(grid.shape[2]):
-                for y in range(grid.shape[1] - 1, -1, -1):
-                    if grid[x, y, z] != 0:
-                        proj[x, z] = grid[x, y, z]
-                        break
-        return proj
-    elif view == "back":
-        proj = np.zeros((grid.shape[0], grid.shape[2]), dtype=np.int32)
-        for x in range(grid.shape[0]):
-            for z in range(grid.shape[2]):
-                for y in range(grid.shape[1]):
-                    if grid[x, y, z] != 0:
-                        proj[x, z] = grid[x, y, z]
-                        break
-        return proj
-    elif view == "left":
-        proj = np.zeros((grid.shape[1], grid.shape[2]), dtype=np.int32)
-        for y_idx in range(grid.shape[1]):
-            for z in range(grid.shape[2]):
-                for x in range(grid.shape[0]):
-                    if grid[x, y_idx, z] != 0:
-                        proj[y_idx, z] = grid[x, y_idx, z]
-                        break
-        return proj
-    elif view == "right":
-        proj = np.zeros((grid.shape[1], grid.shape[2]), dtype=np.int32)
-        for y_idx in range(grid.shape[1]):
-            for z in range(grid.shape[2]):
-                for x in range(grid.shape[0] - 1, -1, -1):
-                    if grid[x, y_idx, z] != 0:
-                        proj[y_idx, z] = grid[x, y_idx, z]
-                        break
-        return proj
-    elif view == "top":
-        proj = np.zeros((grid.shape[0], grid.shape[1]), dtype=np.int32)
-        for x in range(grid.shape[0]):
-            for y_idx in range(grid.shape[1]):
-                for z in range(grid.shape[2] - 1, -1, -1):
-                    if grid[x, y_idx, z] != 0:
-                        proj[x, y_idx] = grid[x, y_idx, z]
-                        break
-        return proj
-    elif view == "bottom":
-        proj = np.zeros((grid.shape[0], grid.shape[1]), dtype=np.int32)
-        for x in range(grid.shape[0]):
-            for y_idx in range(grid.shape[1]):
-                for z in range(grid.shape[2]):
-                    if grid[x, y_idx, z] != 0:
-                        proj[x, y_idx] = grid[x, y_idx, z]
-                        break
-        return proj
-    raise ValueError(f"Unknown view: {view}")
+    if view not in _VIEW_RAYS:
+        raise ValueError(f"Unknown view: {view}")
+    axis, from_high = _VIEW_RAYS[view]
+
+    occupied = grid != 0
+    scan = np.flip(occupied, axis=axis) if from_high else occupied
+    # argmax returns the first True along the ray (0 when the ray is empty)
+    first = np.argmax(scan, axis=axis)
+    if from_high:
+        first = grid.shape[axis] - 1 - first
+    hit = occupied.any(axis=axis)
+    values = np.take_along_axis(grid, np.expand_dims(first, axis), axis=axis)
+    proj = np.where(hit, np.squeeze(values, axis=axis), 0)
+    return proj.astype(np.int32)
 
 
 def _render_image(
