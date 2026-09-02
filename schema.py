@@ -1,30 +1,15 @@
 """
 LEGO output schema.
 
-Two coordinate systems exist in this file. They are strictly isolated:
-
-  Shape / Position  — legacy model. Y=UP (plates along Y).
-                      Used only by the original pipeline stages (load_image,
-                      decompose_into_primitives, build_model).
-                      Do NOT use these types in Part-based pipeline code.
-
-  Part              — V1 spec model. Z=UP, X=left/right, Y=front/back.
-                      All Part geometry (dimensions, attachment, rotation)
-                      is expressed in this coordinate system throughout.
-                      Do NOT mix Part geometry with Shape/Position types.
-
-There is no reconciliation step between the two systems. They are parallel
-representations used by different pipeline stages.
+Part is the V1 spec model. Z=UP, X=left/right, Y=front/back.
+All Part geometry (dimensions, attachment, rotation) is expressed in this
+coordinate system throughout.
 """
 from __future__ import annotations
 import uuid
 from enum import Enum
 from typing import Literal, Optional
 from pydantic import BaseModel, Field
-
-# Rotation is always a cardinal multiple of 90° around the Y axis (top-down).
-# 0° = default orientation as described in each shape's dimension comments.
-Rotation = Literal[0, 90, 180, 270]
 
 
 BASEPLATE_WIDTH = 50  # studs (legacy Shape pipeline)
@@ -40,12 +25,6 @@ class PrimitiveType(str, Enum):
     ELLIPSOID = "ellipsoid"
     CONE_FRUSTUM = "cone_frustum"
     WEDGE = "wedge"  # legacy Shape only; not valid in Part
-
-
-class Position(BaseModel):
-    x: int = Field(..., description="Studs from left edge of baseplate")
-    y: int = Field(..., description="Plates from baseplate surface")
-    z: int = Field(..., description="Studs from front edge of baseplate")
 
 
 class CuboidDimensions(BaseModel):
@@ -67,47 +46,10 @@ class CylinderDimensions(BaseModel):
     )
 
 
-class WedgeDimensions(BaseModel):
-    width: int = Field(..., ge=1, description="Studs along X")
-    height: int = Field(..., ge=1, description="Plates along Y")
-    depth: int = Field(..., ge=1, description="Studs along Z")
-    direction: Literal["left", "right", "front", "back"] = "right"
-
-
-class Shape(BaseModel):
-    id: str
-    type: PrimitiveType
-    position: Position
-    dimensions: CuboidDimensions | CylinderDimensions | WedgeDimensions
-    rotation: Rotation = Field(0, description="Degrees clockwise around Y axis")
-    color: str = Field(..., description="Hex color, e.g. #FF0000")
-    label: str = Field("", description="Semantic label, e.g. 'wheel', 'roof'")
-
-
-class BoundingBox(BaseModel):
-    x: int
-    y: int
-    z: int
-    width: int   # studs
-    height: int  # plates
-    depth: int   # studs
-
-
-class LegoModel(BaseModel):
-    source_image: str = Field("", description="Original filename or path")
-    baseplate: dict = Field(
-        default={"width": BASEPLATE_WIDTH, "depth": BASEPLATE_DEPTH},
-        description="Fixed 50x50 stud baseplate",
-    )
-    bounding_box: BoundingBox
-    shapes: list[Shape]
-
-
 # ---------------------------------------------------------------------------
 # Part-world types  (Z=UP coordinate system — spec §5)
 # ---------------------------------------------------------------------------
 # All types below use: X = left/right, Y = front/back, Z = up.
-# Do NOT mix these with Shape, Position, or any legacy Y=UP type above.
 
 # Valid faces on a bounding cuboid for attachment (2-face model).
 Face = Literal["top", "bottom", "front", "back", "left", "right"]

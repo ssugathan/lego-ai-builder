@@ -1,37 +1,35 @@
 """
-Core pipeline: image path → LegoModel JSON.
+Core pipeline: list of Parts → voxel grid.
 
-Stages:
-  1. load_image        – read and validate the file
-  2. interpret_image   – placeholder for LLM scene description
-  3. decompose         – placeholder for primitive decomposition
-  4. build_model       – assemble LegoModel and return as JSON
+Deterministic Part-world pipeline (Z=UP, 100x100x100 grid). Entry points
+are build_part_world / run_part_world, which run the stages in order:
+
+   1. validate_graph          – structural validation of the part graph
+   2. enforce_critical_closure – ancestors of critical parts become critical
+   3. enforce_single_root     – merge multiple roots under a single root
+   4. attach_parts            – resolve face attachments to world centers
+   5. compute_scale           – uniform scale factor to fit the grid
+   6. apply_scale             – scale all part states
+   7. final_placement         – center on the grid, ground at Z=0
+   8. apply_rotation          – hierarchical rotations about anchors
+   9. voxelize                – rasterize each primitive into voxel claims
+  10. apply_ownership         – resolve overlapping claims to one owner
+  11. critical_restoration    – restore critical parts that voxelized to zero
+  12. enforce_connectivity    – flood fill and bridge disconnected islands
+
+The output grid is int32, 0 = empty, n = 1-based part index.
 """
-import base64
-import json
 import math
 from collections import deque
 from dataclasses import dataclass
 from functools import cmp_to_key
-from pathlib import Path
 
 import numpy as np
 
 from schema import (
-    BASEPLATE_DEPTH,
-    BASEPLATE_WIDTH,
-    GRID_SIZE,
-    BoundingBox,
-    CuboidDimensions,
-    CylinderDimensions,
-    Face,
-    LegoModel,
     Part,
     PartDimensions,
-    Position,
     PrimitiveType,
-    Shape,
-    WedgeDimensions,
 )
 
 
@@ -1324,245 +1322,3 @@ def run_part_world(
         "voxel_counts": {s.uid: int((grid == i + 1).sum()) for i, s in enumerate(states)},
         "total_occupied": int((grid > 0).sum()),
     }
-
-
-# ---------------------------------------------------------------------------
-# Stage 1: Image loading
-# ---------------------------------------------------------------------------
-
-def load_image(image_path: str) -> dict:
-    """Read image from disk, return a dict with metadata and base64 payload."""
-    path = Path(image_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Image not found: {image_path}")
-    if path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
-        raise ValueError(f"Unsupported image format: {path.suffix}")
-
-    raw = path.read_bytes()
-    return {
-        "filename": path.name,
-        "format": path.suffix.lstrip(".").lower(),
-        "size_bytes": len(raw),
-        "base64": base64.b64encode(raw).decode("utf-8"),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Stage 2: LLM image interpretation (placeholder)
-# ---------------------------------------------------------------------------
-
-def interpret_image(image_data: dict) -> dict:
-    """
-    Placeholder: send image to an LLM and return a structured scene description.
-
-    Expected output shape:
-    {
-        "subject": str,          # e.g. "a red racing car"
-        "category": str,         # broad class, e.g. "vehicle", "animal", "building"
-        "symmetry": str,         # "symmetric" | "asymmetric"
-        "objects": [
-            {
-                "label": str,            # e.g. "body", "wheel", "roof"
-                "color": str,            # hex, e.g. "#FF0000"
-                "relative_size": str,    # "small" | "medium" | "large"
-                "primitive_hint": str,   # "cuboid" | "cylinder" | "wedge"
-            }
-        ]
-    }
-    """
-    # TODO: call Claude / vision model with image_data["base64"]
-    return {
-        "subject": "a red car (stub)",
-        "category": "vehicle",
-        "symmetry": "symmetric",
-        "objects": [
-            {"label": "body",  "color": "#CC0000", "relative_size": "large",  "primitive_hint": "cuboid",   "relative_position": "center"},
-            {"label": "wheel", "color": "#222222", "relative_size": "medium", "primitive_hint": "cylinder", "relative_position": "under"},
-            {"label": "roof",  "color": "#CC0000", "relative_size": "small",  "primitive_hint": "wedge",    "relative_position": "on_top"},
-        ],
-    }
-
-
-# ---------------------------------------------------------------------------
-# Stage 3: Primitive decomposition (placeholder)
-# ---------------------------------------------------------------------------
-
-_SIZE_DIMS = {
-    #              (width, height, depth)   used for cuboid + wedge
-    "small":       (2, 2, 2),
-    "medium":      (4, 3, 4),
-    "large":       (6, 6, 6),
-}
-
-_SIZE_CYLINDER = {
-    #              (diameter, height)
-    "small":       (2, 2),
-    "medium":      (4, 3),
-    "large":       (6, 6),
-}
-
-_HINT_TO_TYPE = {
-    "cuboid":   PrimitiveType.CUBOID,
-    "cylinder": PrimitiveType.CYLINDER,
-    "wedge":    PrimitiveType.WEDGE,
-}
-
-
-def _make_dimensions(hint: str, size: str):
-    if hint == "cylinder":
-        diameter, height = _SIZE_CYLINDER.get(size, _SIZE_CYLINDER["medium"])
-        return CylinderDimensions(diameter=diameter, height=height)
-    w, h, d = _SIZE_DIMS.get(size, _SIZE_DIMS["medium"])
-    if hint == "wedge":
-        return WedgeDimensions(width=w, height=h, depth=d)
-    return CuboidDimensions(width=w, height=h, depth=d)
-
-
-def _footprint(dims) -> tuple[int, int]:
-    """Return (width_x, depth_z) for any dimensions type."""
-    if isinstance(dims, CylinderDimensions):
-        return dims.diameter, dims.depth_studs if dims.depth_studs is not None else dims.diameter
-    return dims.width, dims.depth
-
-
-def _y_offset(rel_pos: str, dims, body_height: int) -> tuple[int, int]:
-    """
-    Return (y, x_nudge) for a shape given its relative_position.
-
-    - "center" / default: y=0, no x nudge
-    - "under":            y=0, x nudge of +1 stud (offset within slot)
-    - "on_top":           y=body_height, no x nudge
-    """
-    if rel_pos == "on_top":
-        return body_height, 0
-    if rel_pos == "under":
-        return 0, 1
-    return 0, 0  # "center" or unrecognised
-
-
-def decompose_into_primitives(scene: dict) -> list[Shape]:
-    """
-    Convert a scene description into a list of Shapes.
-
-    Slot distribution: objects spread evenly along X, centred on Z.
-    Y placement: driven by each object's optional relative_position field.
-      - "center" (default): y=0
-      - "under":            y=0, +1 stud x-nudge within slot
-      - "on_top":           y = height of the "body" shape
-    Dimensions: determined by relative_size + primitive_hint.
-    TODO: replace with real decomposition logic (rule-based or LLM-assisted).
-    """
-    objects = scene.get("objects", [])
-    n = len(objects)
-
-    # Pre-pass: resolve all dims so on_top can reference body height.
-    all_dims = [
-        _make_dimensions(obj.get("primitive_hint", "cuboid"), obj.get("relative_size", "medium"))
-        for obj in objects
-    ]
-    body_height = next(
-        (d.height for obj, d in zip(objects, all_dims) if obj.get("label") == "body"),
-        0,
-    )
-
-    # Find the body's slot origin. All grouped objects share it.
-    # Fall back to per-object slot distribution when no body is present.
-    body_index = next(
-        (i for i, obj in enumerate(objects) if obj.get("label") == "body"),
-        None,
-    )
-    slot_width = BASEPLATE_WIDTH // max(n, 1)
-    if body_index is not None:
-        body_fw, _ = _footprint(all_dims[body_index])
-        body_slot_x = slot_width * body_index + (slot_width - body_fw) // 2
-    else:
-        body_slot_x = None
-
-    shapes = []
-
-    for i, (obj, dims) in enumerate(zip(objects, all_dims)):
-        fw, fd = _footprint(dims)
-        hint = obj.get("primitive_hint", "cuboid")
-        rel_pos = obj.get("relative_position", "center")
-        y, x_nudge = _y_offset(rel_pos, dims, body_height)
-
-        if body_slot_x is not None:
-            # All objects anchor to the body's slot; only x_nudge varies within it.
-            x = body_slot_x + x_nudge
-        else:
-            x = slot_width * i + (slot_width - fw) // 2 + x_nudge
-        z = (BASEPLATE_DEPTH - fd) // 2
-
-        shapes.append(
-            Shape(
-                id=f"shape_{i}",
-                type=_HINT_TO_TYPE.get(hint, PrimitiveType.CUBOID),
-                position=Position(x=x, y=y, z=z),
-                dimensions=dims,
-                rotation=0,
-                color=obj.get("color", "#AAAAAA"),
-                label=obj.get("label", ""),
-            )
-        )
-    return shapes
-
-
-# ---------------------------------------------------------------------------
-# Stage 4: Model assembly
-# ---------------------------------------------------------------------------
-
-def _shape_extents(shape: Shape) -> tuple[int, int, int]:
-    """Return (width_x, height_y, depth_z) occupied studs/plates for a shape."""
-    d = shape.dimensions
-    if isinstance(d, (CuboidDimensions, WedgeDimensions)):
-        return d.width, d.height, d.depth
-    if isinstance(d, CylinderDimensions):
-        return d.diameter, d.height, d.depth_studs if d.depth_studs is not None else d.diameter
-    raise TypeError(f"Unknown dimensions type: {type(d)}")
-
-
-def build_model(image_filename: str, shapes: list[Shape]) -> LegoModel:
-    """Wrap shapes in a LegoModel with a tight bounding box."""
-    if not shapes:
-        bbox = BoundingBox(x=0, y=0, z=0, width=0, height=0, depth=0)
-    else:
-        x_starts, y_starts, z_starts = [], [], []
-        x_ends,   y_ends,   z_ends   = [], [], []
-        for s in shapes:
-            ex, ey, ez = _shape_extents(s)
-            x_starts.append(s.position.x);       x_ends.append(s.position.x + ex)
-            y_starts.append(s.position.y);       y_ends.append(s.position.y + ey)
-            z_starts.append(s.position.z);       z_ends.append(s.position.z + ez)
-        bbox = BoundingBox(
-            x=min(x_starts), y=min(y_starts), z=min(z_starts),
-            width=max(x_ends)  - min(x_starts),
-            height=max(y_ends) - min(y_starts),
-            depth=max(z_ends)  - min(z_starts),
-        )
-
-    return LegoModel(
-        source_image=image_filename,
-        bounding_box=bbox,
-        shapes=shapes,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
-
-def run(image_path: str) -> str:
-    """Full pipeline. Returns a JSON string."""
-    image_data = load_image(image_path)
-    scene = interpret_image(image_data)
-    shapes = decompose_into_primitives(scene)
-    model = build_model(image_data["filename"], shapes)
-    return model.model_dump_json(indent=2)
-
-
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) != 2:
-        print("Usage: python pipeline.py <image_path>")
-        sys.exit(1)
-    print(run(sys.argv[1]))
