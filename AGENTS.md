@@ -52,3 +52,16 @@ The repo is the source of truth for what's done and pending, because sessions st
 - `.claude/commands/` holds Claude Code slash commands (spec-agent, status, place-files); other agents can ignore that directory.
 - CLAUDE.md exists only as an import shim for Claude Code plus Claude-specific notes.
 - Context: this project doubles as the first real product run through the PM OS orchestrator (QA pass on the shape-reversion bug is the planned first sprint).
+
+## Cross-agent handoff
+
+This repository is worked on by multiple coding agents (Claude Code in the cloud, Codex CLI on the laptop, possibly others). GitHub is the sole source of truth; chat history is not project state.
+
+- Begin every new task from the latest `main`; continuing your own in-flight branch is fine after a fetch.
+- Read `AGENTS.md` and `PROGRESS.md` before making changes.
+- Use a dedicated branch for every task. Never push directly to `main`.
+- Update `PROGRESS.md` with completed work, remaining work, and how it was verified.
+- Commit and push all intended changes before ending the session.
+- Record any unverified behavior or unresolved blocker explicitly in `PROGRESS.md`.
+- Do not continue work from another agent's unmerged branch unless explicitly instructed.
+- Run the verification suite before pushing: `pytest` (all three suites) — must be green.
