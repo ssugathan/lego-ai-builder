@@ -10,17 +10,15 @@ Endpoints:
     POST /api/feedback  — refine with user feedback using session context
     POST /api/export    — export finalized model
     GET  /              — serves static/index.html
-
-Deprecated (kept for backward compatibility):
-    POST /api/run       — run pipeline from raw parts JSON
-    POST /api/validate  — validate + refine (old multi-step flow)
 """
 from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
+import sys
 import time
 import traceback
 import uuid
@@ -30,30 +28,97 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
-import numpy as np
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+import numpy as np  # noqa: E402
+from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi.responses import HTMLResponse, JSONResponse  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 
-from pipeline import run_part_world
-from schema import Part, GRID_SIZE
-from render import render_projections
-from llm import describe_image_bytes, generate_parts, validate_and_refine
+from pipeline import run_part_world  # noqa: E402
+from schema import Part, GRID_SIZE  # noqa: E402
+from render import render_projections  # noqa: E402
+from llm import describe_image_bytes, generate_parts, validate_and_refine  # noqa: E402
 
 app = FastAPI(title="Lego Builder")
+
+log = logging.getLogger("server")
+if not log.handlers and not logging.getLogger().handlers:
+    _handler = logging.StreamHandler(sys.stderr)
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    log.addHandler(_handler)
+log.setLevel(logging.INFO)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 LOG_PATH = Path(__file__).parent / "pipeline_log.jsonl"
 
+
 # ---------------------------------------------------------------------------
-# Session store (in-memory)
+# Error handling
+#
+# Unexpected exceptions are logged server-side with a full traceback and a
+# short error id; the client only ever sees a generic message plus that id.
+# Status mapping (conservative):
+#   502 — upstream model errors: google-genai APIError (and subclasses) or
+#         ValueError raised while parsing/validating model output.
+#   500 — anything else (unexpected server error).
+# Genuine client errors (bad image payload, missing key, empty input) are
+# rejected before the pipeline runs and keep their explicit 4xx responses.
 # ---------------------------------------------------------------------------
-_sessions: dict[str, dict] = {}
+try:
+    from google.genai.errors import APIError as _GenaiAPIError
+except Exception:  # pragma: no cover - genai always present in practice
+    class _GenaiAPIError(Exception):
+        pass
+
+
+def _classify_exception(exc: Exception) -> tuple[int, str]:
+    """Map an unexpected pipeline exception to (status_code, generic message)."""
+    if isinstance(exc, (_GenaiAPIError, ValueError)):
+        return 502, "The model service failed or returned unusable output. Please try again."
+    return 500, "Internal server error."
+
+
+def _error_response(exc: Exception, endpoint: str) -> JSONResponse:
+    """Log the full traceback server-side; return a generic message + error id."""
+    error_id = uuid.uuid4().hex[:8]
+    status, message = _classify_exception(exc)
+    log.error(
+        "[%s] %s error %s: %s\n%s",
+        error_id, endpoint, status, exc, traceback.format_exc(),
+    )
+    return JSONResponse(
+        {
+            "error": message,
+            "error_id": error_id,
+            "detail": f"{message} (error id: {error_id})",
+        },
+        status_code=status,
+    )
+
+# ---------------------------------------------------------------------------
+# Session store (in-memory, bounded)
+#
+# Capped LRU store: each session holds a full 100^3 voxel grid, so an
+# unbounded dict lets anyone OOM the demo by generating models. On insert
+# beyond the cap, the least-recently-used session is evicted; feedback or
+# export against an evicted session returns 404 "session expired".
+# ---------------------------------------------------------------------------
+from collections import OrderedDict  # noqa: E402
+
+_MAX_SESSIONS = 100
+_sessions: OrderedDict[str, dict] = OrderedDict()
+
+SESSION_EXPIRED_MSG = (
+    "Session expired or unknown. Sessions are kept in memory and the oldest "
+    "are dropped when the server is busy — generate a new model to continue."
+)
 
 
 def _get_session(session_id: str) -> dict | None:
-    return _sessions.get(session_id)
+    session = _sessions.get(session_id)
+    if session is not None:
+        _sessions.move_to_end(session_id)  # LRU touch
+    return session
 
 
 def _create_session(description: str, parts: list[dict], grid: np.ndarray) -> str:
@@ -63,6 +128,9 @@ def _create_session(description: str, parts: list[dict], grid: np.ndarray) -> st
         "parts": parts,
         "grid": grid,
     }
+    while len(_sessions) > _MAX_SESSIONS:
+        evicted_sid, _ = _sessions.popitem(last=False)
+        log.info("Session store full (max %d): evicted session %s", _MAX_SESSIONS, evicted_sid)
     return sid
 
 
@@ -70,6 +138,7 @@ def _update_session(session_id: str, parts: list[dict], grid: np.ndarray) -> Non
     if session_id in _sessions:
         _sessions[session_id]["parts"] = parts
         _sessions[session_id]["grid"] = grid
+        _sessions.move_to_end(session_id)  # LRU touch
 
 
 # ---------------------------------------------------------------------------
@@ -165,11 +234,35 @@ def _build_voxel_response(
     return voxels, parts_meta, stats
 
 
+# Server-side input limits (mirror the client-side checks in static/index.html;
+# the server must enforce them itself since the demo API is publicly reachable).
+MAX_DESCRIPTION_CHARS = 4000
+MAX_IMAGE_BYTES = 12 * 1024 * 1024  # decoded bytes; matches MAX_IMAGE_BYTES in the client
+
+
+class InputRejected(ValueError):
+    """Client input exceeded a server-side limit (mapped to HTTP 422)."""
+
+
+def _sniff_image_mime(raw: bytes) -> str | None:
+    """Identify jpeg/png/webp from magic bytes; None for anything else."""
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def _decode_request_image(image_field: str | None) -> tuple[bytes, str] | None:
     """
     Decode optional base64 image from JSON body.
     Accepts raw base64 or a data URL (data:image/png;base64,...).
     Returns (bytes, mime_type) or None if field empty.
+
+    Raises InputRejected (→ 422) for oversized or non-jpeg/png/webp payloads,
+    plain ValueError (→ 400) for malformed base64 / data URLs.
     """
     if image_field is None:
         return None
@@ -177,12 +270,10 @@ def _decode_request_image(image_field: str | None) -> tuple[bytes, str] | None:
     if not s:
         return None
 
-    mime_type = "image/jpeg"
     if s.startswith("data:"):
         m = re.match(r"data:([^;]+);base64,(.+)", s, re.DOTALL | re.IGNORECASE)
         if not m:
             raise ValueError("Invalid image data URL (expected data:<mime>;base64,...)")
-        mime_type = m.group(1).strip() or mime_type
         b64 = m.group(2).strip()
     else:
         b64 = s
@@ -192,9 +283,13 @@ def _decode_request_image(image_field: str | None) -> tuple[bytes, str] | None:
     except Exception as exc:
         raise ValueError(f"Invalid base64 image: {exc}") from exc
 
-    max_bytes = 20 * 1024 * 1024
-    if len(raw) > max_bytes:
-        raise ValueError(f"Image too large (max {max_bytes // (1024 * 1024)} MB)")
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise InputRejected(f"Image too large (max {MAX_IMAGE_BYTES // (1024 * 1024)} MB)")
+
+    # Trust the file's magic bytes, not the client-declared mime type.
+    mime_type = _sniff_image_mime(raw)
+    if mime_type is None:
+        raise InputRejected("Unsupported image format. Use JPEG, PNG, or WebP.")
 
     return raw, mime_type
 
@@ -229,17 +324,6 @@ class ExportRequest(BaseModel):
     format: str = "voxel_json"
 
 
-# Deprecated request models (backward compat)
-class RunRequest(BaseModel):
-    parts: list[Part]
-    debug: bool = False
-
-
-class ValidateRequest(BaseModel):
-    parts: list[Part]
-    description: str
-    debug: bool = False
-
 
 # ---------------------------------------------------------------------------
 # POST /api/generate — full pipeline
@@ -258,8 +342,16 @@ def api_generate(req: GenerateRequest) -> JSONResponse:
         )
 
     user_description = (req.description or "").strip()
+    if len(user_description) > MAX_DESCRIPTION_CHARS:
+        return JSONResponse(
+            {"error": f"Description too long (max {MAX_DESCRIPTION_CHARS} characters)."},
+            status_code=422,
+        )
+
     try:
         image_payload = _decode_request_image(req.image)
+    except InputRejected as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -420,10 +512,7 @@ def api_generate(req: GenerateRequest) -> JSONResponse:
     except Exception as exc:
         telemetry["error"] = str(exc)
         _log_telemetry(telemetry)
-        return JSONResponse(
-            {"error": str(exc), "detail": traceback.format_exc()},
-            status_code=400,
-        )
+        return _error_response(exc, "/api/generate")
 
     # Aggregate token totals across all LLM calls
     total_tokens = 0
@@ -460,7 +549,7 @@ def api_feedback(req: FeedbackRequest) -> JSONResponse:
     session = _get_session(req.session_id)
     if session is None:
         return JSONResponse(
-            {"error": f"Unknown session_id: {req.session_id}"},
+            {"error": SESSION_EXPIRED_MSG},
             status_code=404,
         )
 
@@ -482,7 +571,6 @@ def api_feedback(req: FeedbackRequest) -> JSONResponse:
     try:
         parts_dicts = session["parts"]
         description = session["description"]
-        grid = session["grid"]
 
         # Build parts_meta for projections
         part_objects = _parts_dicts_to_objects(parts_dicts)
@@ -572,10 +660,7 @@ def api_feedback(req: FeedbackRequest) -> JSONResponse:
     except Exception as exc:
         telemetry["error"] = str(exc)
         _log_telemetry(telemetry)
-        return JSONResponse(
-            {"error": str(exc), "detail": traceback.format_exc()},
-            status_code=400,
-        )
+        return _error_response(exc, "/api/feedback")
 
     total_tokens = 0
     total_input = 0
@@ -606,7 +691,7 @@ def api_export(req: ExportRequest) -> JSONResponse:
     session = _get_session(req.session_id)
     if session is None:
         return JSONResponse(
-            {"error": f"Unknown session_id: {req.session_id}"},
+            {"error": SESSION_EXPIRED_MSG},
             status_code=404,
         )
 
@@ -628,11 +713,21 @@ def api_export(req: ExportRequest) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
+# Debug surfaces — only served when DEBUG_ENDPOINTS=1 is set in the
+# environment; otherwise they 404 as if they did not exist.
+# ---------------------------------------------------------------------------
+def _require_debug_enabled() -> None:
+    if os.environ.get("DEBUG_ENDPOINTS", "") != "1":
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+# ---------------------------------------------------------------------------
 # GET /api/telemetry — view recent pipeline logs (JSON)
 # ---------------------------------------------------------------------------
 @app.get("/api/telemetry")
 def api_telemetry() -> JSONResponse:
-    """Return the last 50 pipeline log entries."""
+    """Return the last 50 pipeline log entries. Requires DEBUG_ENDPOINTS=1."""
+    _require_debug_enabled()
     if not LOG_PATH.exists():
         return JSONResponse(content={"entries": []})
     lines = LOG_PATH.read_text().strip().split("\n")
@@ -649,7 +744,9 @@ RESPONSE_LOG_PATH = Path(__file__).parent / "gemini_responses.jsonl"
 
 @app.get("/api/responses")
 def api_responses(last: int = 10) -> JSONResponse:
-    """Return the last N Gemini responses for debugging."""
+    """Return the last N Gemini responses for debugging. Requires DEBUG_ENDPOINTS=1."""
+    _require_debug_enabled()
+    last = max(1, min(last, 50))
     if not RESPONSE_LOG_PATH.exists():
         return JSONResponse(content={"entries": []})
     lines = RESPONSE_LOG_PATH.read_text().strip().split("\n")
@@ -665,11 +762,10 @@ def api_responses(last: int = 10) -> JSONResponse:
 # ---------------------------------------------------------------------------
 # GET /telemetry — dashboard UI
 # ---------------------------------------------------------------------------
-from fastapi.responses import HTMLResponse
-
 @app.get("/telemetry", response_class=HTMLResponse)
 def telemetry_dashboard():
-    """Telemetry dashboard with top-level metrics and per-job stage breakdown."""
+    """Telemetry dashboard with per-job stage breakdown. Requires DEBUG_ENDPOINTS=1."""
+    _require_debug_enabled()
     return HTMLResponse(content=_TELEMETRY_HTML)
 
 
@@ -929,124 +1025,6 @@ loadData();
 </script>
 </body>
 </html>"""
-
-
-# ---------------------------------------------------------------------------
-# DEPRECATED: POST /api/run  (old multi-step flow)
-# ---------------------------------------------------------------------------
-@app.post("/api/run")
-def api_run(req: RunRequest) -> JSONResponse:
-    """
-    [DEPRECATED] Run the Part-world pipeline from raw parts JSON.
-    Use POST /api/generate instead for the full pipeline flow.
-    """
-    try:
-        result = run_part_world(req.parts, debug=True)
-    except Exception as exc:
-        return JSONResponse(
-            {"error": str(exc), "detail": traceback.format_exc()},
-            status_code=400,
-        )
-
-    grid: np.ndarray = result["grid"]
-    states = result["states"]
-    voxel_counts: dict[str, int] = result["voxel_counts"]
-    total_occupied: int = result["total_occupied"]
-
-    by_uid = {p.uid: p for p in req.parts}
-
-    parts_meta = [
-        {
-            "idx": i + 1,
-            "uid": s.uid,
-            "name": by_uid[s.uid].part_name if s.uid in by_uid else s.uid,
-            "critical": by_uid[s.uid].critical if s.uid in by_uid else False,
-            "voxel_count": voxel_counts.get(s.uid, 0),
-            "color_id": by_uid[s.uid].color_id if s.uid in by_uid else "",
-        }
-        for i, s in enumerate(states)
-    ]
-
-    occ = np.argwhere(grid > 0)
-    voxels = [
-        {
-            "x": int(r[0]),
-            "y": int(r[1]),
-            "z": int(r[2]),
-            "part_idx": int(grid[r[0], r[1], r[2]]),
-        }
-        for r in occ
-    ]
-
-    response: dict = {
-        "voxels": voxels,
-        "parts": parts_meta,
-        "stats": {
-            "total_occupied": total_occupied,
-            "grid_size": {"x": 50, "y": 50, "z": 100},
-        },
-    }
-
-    if req.debug:
-        response["debug"] = {
-            "scale": float(result["scale"]),
-            "voxel_counts": voxel_counts,
-        }
-
-    return JSONResponse(content=response)
-
-
-# ---------------------------------------------------------------------------
-# DEPRECATED: POST /api/validate  (old multi-step flow)
-# ---------------------------------------------------------------------------
-@app.post("/api/validate")
-def api_validate(req: ValidateRequest) -> JSONResponse:
-    """
-    [DEPRECATED] Validate + refine from raw parts JSON.
-    Use POST /api/generate + POST /api/feedback instead.
-    """
-    key = GEMINI_API_KEY
-    if not key:
-        return JSONResponse(
-            {"error": "No GEMINI_API_KEY set for validation."},
-            status_code=400,
-        )
-
-    try:
-        result = run_part_world(req.parts, debug=True)
-        grid = result["grid"]
-        by_uid = {p.uid: p for p in req.parts}
-
-        parts_meta = [
-            {
-                "idx": i + 1, "uid": s.uid,
-                "name": by_uid[s.uid].part_name if s.uid in by_uid else s.uid,
-                "critical": by_uid[s.uid].critical if s.uid in by_uid else False,
-                "voxel_count": result["voxel_counts"].get(s.uid, 0),
-                "color_id": by_uid[s.uid].color_id if s.uid in by_uid else "",
-            }
-            for i, s in enumerate(result["states"])
-        ]
-
-        projections = render_projections(grid, parts_meta)
-        images = [(img_bytes, mime) for img_bytes, mime, _label in projections]
-
-        parts_for_llm = [p.model_dump(mode="json") for p in req.parts]
-        val_result = validate_and_refine(images, req.description, parts_for_llm, key)
-
-        refined_parts = val_result.pop("refined_parts", None)
-        response = {"validation": val_result}
-
-        if refined_parts and val_result.get("edit_count", 0) > 0:
-            response["refined_parts"] = refined_parts
-
-    except Exception as exc:
-        return JSONResponse(
-            {"error": str(exc), "detail": traceback.format_exc()},
-            status_code=400,
-        )
-
-    return JSONResponse(content=response)
 
 
 # Serve the frontend.  Must be mounted after all API routes.

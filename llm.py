@@ -756,13 +756,14 @@ def _expand_instances(data: dict) -> list[dict]:
     return parts
 
 
-def generate_parts(description: str, api_key: str) -> tuple[list[dict], dict | None]:
+def generate_parts(description: str, api_key: str) -> tuple[list[dict], dict | None, dict]:
     """
     Call Gemini 2.5 Pro to generate Part JSON from a text description.
 
     Gemini returns part_types + instances format.
     This function expands instances into a flat Part list ready for /api/run.
-    Returns (parts, strategy) where strategy is the _strategy object or None.
+    Returns (parts, strategy, call_stats) where strategy is the _strategy
+    object or None and call_stats is the Gemini call stats dict.
     Raises ValueError on parse failure or API error.
     """
     client = genai.Client(api_key=api_key)

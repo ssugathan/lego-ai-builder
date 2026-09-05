@@ -3,4 +3,6 @@ pydantic
 fastapi
 uvicorn[standard]
 google-genai
-python-multipart
+matplotlib
+python-dotenv
+pytest
